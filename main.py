@@ -388,16 +388,85 @@ def save_html(html: str, out_dir: str | Path, filename: str) -> str:
     return str(path)
 
 
-def save_document(content: str, out_dir: str | Path, filename: str) -> str:
-    """保存按格式生成的内容（.html 或 .md）。"""
+def save_document(content: str, out_dir: str | Path, filename: str, skip_if_exists: bool = False) -> str | None:
+    """保存按格式生成的内容（.html 或 .md）。
+    
+    Args:
+        content: 要保存的内容
+        out_dir: 输出目录
+        filename: 文件名
+        skip_if_exists: 如果文件已存在，是否跳过（返回 None）
+    
+    Returns:
+        保存的文件路径，如果跳过则返回 None
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / filename
+    if skip_if_exists and path.exists():
+        return None
     path.write_text(content, encoding='utf-8')
     return str(path)
 
 
-def build_index_html(items: list[dict], out_dir: str | Path) -> str:
+def load_existing_index(out_dir: str | Path) -> list[dict]:
+    """从已存在的索引文件中加载帖子列表。"""
+    out_dir = Path(out_dir)
+    existing_items = []
+    
+    # 尝试从 HTML 索引加载
+    index_html = out_dir / 'index.html'
+    if index_html.exists():
+        try:
+            content = index_html.read_text(encoding='utf-8')
+            # 简单解析：提取所有链接
+            import re
+            # 匹配 <a href="文件名">标题</a> 和原帖链接
+            pattern = r'<a href="([^"]+)"[^>]*>([^<]+)</a>.*?<a href="([^"]+)"[^>]*>([^<]+)</a>'
+            matches = re.findall(pattern, content)
+            for match in matches:
+                filename, title, url, _ = match
+                if filename.endswith(('.html', '.md')) and 'xiaohongshu.com' in url:
+                    existing_items.append({
+                        'file': filename,
+                        'title': title,
+                        'url': url,
+                    })
+        except Exception:
+            pass
+    
+    # 尝试从 Markdown 索引加载
+    index_md = out_dir / 'index.md'
+    if index_md.exists():
+        try:
+            content = index_md.read_text(encoding='utf-8')
+            import re
+            # 匹配 Markdown 链接格式: - [标题](文件)  原帖: URL
+            pattern = r'- \[([^\]]+)\]\(([^\)]+)\)\s+原帖:\s+(\S+)'
+            matches = re.findall(pattern, content)
+            for match in matches:
+                title, filename, url = match
+                if filename.endswith(('.html', '.md')) and 'xiaohongshu.com' in url:
+                    existing_items.append({
+                        'file': filename,
+                        'title': title,
+                        'url': url,
+                    })
+        except Exception:
+            pass
+    
+    return existing_items
+
+
+def build_index_html(items: list[dict], out_dir: str | Path, merge_existing: bool = True) -> str:
+    """构建索引 HTML，可选择合并已存在的索引。"""
+    if merge_existing:
+        existing = load_existing_index(out_dir)
+        # 按 URL 去重，新项目优先
+        seen_urls = {item['url'] for item in items}
+        existing_filtered = [item for item in existing if item.get('url') not in seen_urls]
+        items = items + existing_filtered
+    
     head = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>小红书爬取结果索引</title><style>
 body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.6;padding:24px;max-width:980px;margin:0 auto;background:#fafafa;color:#222}
 h1{font-size:1.8rem;margin:0 0 12px}
@@ -408,7 +477,7 @@ a:hover{text-decoration:underline}
 small{color:#666}
 </style></head><body><h1>小红书爬取结果索引</h1><ul>"""
     lis = ''.join(
-        f'<li><a href="{html_escape(item["file"])}" target="_blank">{html_escape(item["title"] or item["note_id"] if "note_id" in item else "未命名帖子")}</a>'
+        f'<li><a href="{html_escape(item["file"])}" target="_blank">{html_escape(item["title"] or item.get("note_id") or "未命名帖子")}</a>'
         f' <small>原帖: <a href="{html_escape(item["url"])}" target="_blank">{html_escape(item["url"])}</a></small></li>'
         for item in items
     )
@@ -418,7 +487,15 @@ small{color:#666}
     return str(index_path)
 
 
-def build_index_markdown(items: list[dict], out_dir: str | Path) -> str:
+def build_index_markdown(items: list[dict], out_dir: str | Path, merge_existing: bool = True) -> str:
+    """构建索引 Markdown，可选择合并已存在的索引。"""
+    if merge_existing:
+        existing = load_existing_index(out_dir)
+        # 按 URL 去重，新项目优先
+        seen_urls = {item['url'] for item in items}
+        existing_filtered = [item for item in existing if item.get('url') not in seen_urls]
+        items = items + existing_filtered
+    
     lines = ["# 小红书爬取结果索引", ""]
     for item in items:
         title = item.get('title') or item.get('note_id') or '未命名帖子'
@@ -428,6 +505,67 @@ def build_index_markdown(items: list[dict], out_dir: str | Path) -> str:
     index_path = Path(out_dir) / 'index.md'
     index_path.write_text("\n".join(lines), encoding='utf-8')
     return str(index_path)
+
+
+def extract_note_id_from_url(url: str) -> str | None:
+    """从 URL 中提取 note_id。"""
+    m = re.search(r'/explore/([0-9a-zA-Z_-]+)', url) or re.search(r'/discovery/item/([0-9a-zA-Z_-]+)', url)
+    return m.group(1) if m else None
+
+
+def get_existing_note_ids(out_dir: str | Path, out_format: str = 'html') -> set[str]:
+    """从输出目录中提取所有已存在的 note_id。"""
+    out_dir = Path(out_dir)
+    if not out_dir.exists():
+        return set()
+    
+    note_ids = set()
+    ext = 'html' if out_format == 'html' else 'md'
+    
+    # 遍历输出目录中的所有文件
+    for file_path in out_dir.glob(f'*.{ext}'):
+        filename = file_path.stem  # 获取不带扩展名的文件名
+        # 文件名格式：note_id_title 或 note_id
+        # 提取第一个下划线之前的部分作为 note_id
+        parts = filename.split('_', 1)
+        if parts:
+            potential_id = parts[0]
+            # 验证是否是有效的 note_id 格式（长度大于 6 的字母数字组合）
+            if len(potential_id) > 6 and re.match(r'^[0-9a-zA-Z_-]+$', potential_id):
+                note_ids.add(potential_id)
+    
+    return note_ids
+
+
+def deduplicate_and_filter_links(links: list[str], existing_note_ids: set[str] = None, skip_existing: bool = False) -> tuple[list[str], int, int]:
+    """去重链接并过滤已存在的 note_id。
+    
+    Returns:
+        (去重后的链接列表, 去重数量, 跳过数量)
+    """
+    # 按 note_id 去重
+    seen_ids = {}
+    for url in links:
+        note_id = extract_note_id_from_url(url)
+        if note_id and note_id not in seen_ids:
+            seen_ids[note_id] = url
+    
+    unique_links = list(seen_ids.values())
+    duplicate_count = len(links) - len(unique_links)
+    
+    # 如果启用跳过已存在，过滤已下载的
+    if skip_existing and existing_note_ids:
+        filtered_links = []
+        skipped_count = 0
+        for url in unique_links:
+            note_id = extract_note_id_from_url(url)
+            if note_id and note_id in existing_note_ids:
+                skipped_count += 1
+            else:
+                filtered_links.append(url)
+        return filtered_links, duplicate_count, skipped_count
+    
+    return unique_links, duplicate_count, 0
 
 
 def extract_swiper_images(page) -> list[str]:
@@ -502,7 +640,7 @@ def download_images(urls: list[str], images_dir: Path, prefix: str, referer: str
     return saved
 
 
-def run(user: str, out: str, cookies_path: str | None = None, limit: int | None = None, headless: bool = True, timeout_ms: int = 30000, user_agent: str | None = None, out_format: str = 'html'):
+def run(user: str, out: str, cookies_path: str | None = None, limit: int | None = None, headless: bool = True, timeout_ms: int = 30000, user_agent: str | None = None, out_format: str = 'html', skip_existing: bool = False):
     profile_url = build_profile_url(user)
     print(f"[info] 打开用户主页: {profile_url}")
     with sync_playwright() as pw:
@@ -532,6 +670,17 @@ def run(user: str, out: str, cookies_path: str | None = None, limit: int | None 
         print("[info] 开始滚动加载帖子列表...")
         links = scroll_to_load_all(page, limit=limit)
         print(f"[info] 收集到帖子链接: {len(links)}")
+        
+        # 获取已存在的 note_id 并去重、过滤链接
+        existing_ids = get_existing_note_ids(out, out_format) if skip_existing else set()
+        links, dup_count, skip_count = deduplicate_and_filter_links(links, existing_ids, skip_existing)
+        
+        if dup_count > 0:
+            print(f"[info] 去除重复链接: {dup_count} 个")
+        if skip_count > 0:
+            print(f"[info] 跳过已存在的帖子: {skip_count} 个")
+        print(f"[info] 待处理帖子: {len(links)} 个")
+        
         results = []
         for idx, url in enumerate(links, start=1):
             print(f"[info] [{idx}/{len(links)}] 打开帖子: {url}")
@@ -580,13 +729,14 @@ def run(user: str, out: str, cookies_path: str | None = None, limit: int | None 
             ext = 'html' if out_format == 'html' else 'md'
             filename = f"{fname_base}_{safe_title[:50]}.{ext}" if safe_title else f"{fname_base}.{ext}"
             if out_format == 'html':
-                file_path = save_document(render_post_html(data), out, filename)
+                file_path = save_document(render_post_html(data), out, filename, skip_if_exists=False)
             else:
-                file_path = save_document(render_post_markdown(data), out, filename)
-            results.append({'file': os.path.basename(file_path), 'title': data.get('title'), 'url': url})
+                file_path = save_document(render_post_markdown(data), out, filename, skip_if_exists=False)
+            results.append({'file': os.path.basename(file_path), 'title': data.get('title'), 'url': url, 'note_id': data.get('note_id')})
             detail.close()
-        index_html = build_index_html(results, out)
-        index_md = build_index_markdown(results, out) if out_format == 'markdown' else None
+        # 合并已存在的索引，因为我们已经在处理前过滤了已存在的帖子
+        index_html = build_index_html(results, out, merge_existing=skip_existing)
+        index_md = build_index_markdown(results, out, merge_existing=skip_existing) if out_format == 'markdown' else None
         print(f"[done] 已保存 {len(results)} 个帖子。索引: {index_html}{' / ' + index_md if index_md else ''}")
         context.close()
         browser.close()
@@ -635,14 +785,32 @@ def load_links_from_csv(csv_path: str) -> list[str]:
         return []
 
 
-def run_from_csv(csv_path: str, out: str, cookies_path: str | None = None, limit: int | None = None, headless: bool = True, timeout_ms: int = 30000, user_agent: str | None = None, out_format: str = 'html'):
+def run_from_csv(csv_path: str, out: str, cookies_path: str | None = None, limit: int | None = None, headless: bool = True, timeout_ms: int = 30000, user_agent: str | None = None, out_format: str = 'html', skip_existing: bool = False):
     links = load_links_from_csv(csv_path)
     if not links:
         print(f"[warn] CSV 未读取到有效链接: {csv_path}")
         return
-    if limit:
+    
+    print(f"[info] CSV 读取到 {len(links)} 个链接")
+    
+    # 获取已存在的 note_id 并去重、过滤链接
+    existing_ids = get_existing_note_ids(out, out_format) if skip_existing else set()
+    links, dup_count, skip_count = deduplicate_and_filter_links(links, existing_ids, skip_existing)
+    
+    if dup_count > 0:
+        print(f"[info] 去除重复链接: {dup_count} 个")
+    if skip_count > 0:
+        print(f"[info] 跳过已存在的帖子: {skip_count} 个")
+    
+    # 应用 limit 限制
+    if limit and len(links) > limit:
         links = links[:limit]
-    print(f"[info] 即将处理 {len(links)} 个链接（来源: {csv_path}）")
+    
+    if not links:
+        print("[info] 没有需要处理的链接")
+        return
+    
+    print(f"[info] 即将处理 {len(links)} 个链接")
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=headless)
         context = browser.new_context(
@@ -704,13 +872,14 @@ def run_from_csv(csv_path: str, out: str, cookies_path: str | None = None, limit
             ext = 'html' if out_format == 'html' else 'md'
             filename = f"{fname_base}_{safe_title[:50]}.{ext}" if safe_title else f"{fname_base}.{ext}"
             if out_format == 'html':
-                file_path = save_document(render_post_html(data), out, filename)
+                file_path = save_document(render_post_html(data), out, filename, skip_if_exists=False)
             else:
-                file_path = save_document(render_post_markdown(data), out, filename)
-            results.append({'file': os.path.basename(file_path), 'title': data.get('title'), 'url': url})
+                file_path = save_document(render_post_markdown(data), out, filename, skip_if_exists=False)
+            results.append({'file': os.path.basename(file_path), 'title': data.get('title'), 'url': url, 'note_id': data.get('note_id')})
             detail.close()
-        index_html = build_index_html(results, out)
-        index_md = build_index_markdown(results, out) if out_format == 'markdown' else None
+        # 合并已存在的索引，因为我们已经在处理前过滤了已存在的帖子
+        index_html = build_index_html(results, out, merge_existing=skip_existing)
+        index_md = build_index_markdown(results, out, merge_existing=skip_existing) if out_format == 'markdown' else None
         print(f"[done] 已保存 {len(results)} 个帖子。索引: {index_html}{' / ' + index_md if index_md else ''}")
         context.close()
         browser.close()
@@ -726,6 +895,7 @@ def parse_args():
     parser.add_argument('--timeout', type=int, default=30000, help='页面加载/选择器超时时间（毫秒）')
     parser.add_argument('--user-agent', help='可选，自定义 User-Agent 字符串以提高稳定性')
     parser.add_argument('--format', choices=['html', 'markdown'], default='html', help='输出格式：html 或 markdown，默认 html')
+    parser.add_argument('--skip-existing', action='store_true', help='跳过已存在的文件，不覆盖（会合并到索引中）')
     args = parser.parse_args()
     if not args.user and not args.csv:
         parser.error('必须提供 --user 或 --csv 之一')
@@ -734,13 +904,27 @@ def parse_args():
 
 if __name__ == '__main__':
     args = parse_args()
-    run_from_csv(
-        csv_path=args.csv,
-        out=args.out,
-        cookies_path=args.cookies,
-        limit=args.limit,
-        headless=not args.no_headless,
-        timeout_ms=args.timeout,
-        user_agent=args.user_agent,
-        out_format=args.format,
-    )
+    if args.csv:
+        run_from_csv(
+            csv_path=args.csv,
+            out=args.out,
+            cookies_path=args.cookies,
+            limit=args.limit,
+            headless=not args.no_headless,
+            timeout_ms=args.timeout,
+            user_agent=args.user_agent,
+            out_format=args.format,
+            skip_existing=args.skip_existing,
+        )
+    else:
+        run(
+            user=args.user,
+            out=args.out,
+            cookies_path=args.cookies,
+            limit=args.limit,
+            headless=not args.no_headless,
+            timeout_ms=args.timeout,
+            user_agent=args.user_agent,
+            out_format=args.format,
+            skip_existing=args.skip_existing,
+        )
