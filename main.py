@@ -640,7 +640,100 @@ def download_images(urls: list[str], images_dir: Path, prefix: str, referer: str
     return saved
 
 
-def run(user: str, out: str, cookies_path: str | None = None, limit: int | None = None, headless: bool = True, timeout_ms: int = 30000, user_agent: str | None = None, out_format: str = 'html', skip_existing: bool = False):
+def cache_note_info(links: list[str], out_dir: str | Path, context, timeout_ms: int) -> dict[str, dict]:
+    """获取并缓存帖子标题信息。
+    
+    Returns:
+        {url: {'title': str, 'note_id': str}} 映射
+    """
+    out_dir = Path(out_dir)
+    tmp_dir = out_dir / '.tmp'
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = tmp_dir / 'notes_cache.json'
+    
+    # 尝试从缓存加载
+    cached_data = {}
+    if cache_file.exists():
+        try:
+            cached_data = json.loads(cache_file.read_text(encoding='utf-8'))
+            print(f"[info] 从缓存加载了 {len(cached_data)} 个帖子信息")
+        except Exception as e:
+            print(f"[warn] 读取缓存失败: {e}")
+    
+    # 检查哪些链接需要获取
+    notes_info = {}
+    links_to_fetch = []
+    for url in links:
+        if url in cached_data:
+            notes_info[url] = cached_data[url]
+        else:
+            links_to_fetch.append(url)
+    
+    # 获取未缓存的帖子信息
+    if links_to_fetch:
+        print(f"[info] 需要获取 {len(links_to_fetch)} 个帖子的标题...")
+        for idx, url in enumerate(links_to_fetch, start=1):
+            try:
+                print(f"[info] [{idx}/{len(links_to_fetch)}] 获取标题: {url}")
+                page = context.new_page()
+                page.set_default_navigation_timeout(timeout_ms)
+                page.set_default_timeout(timeout_ms)
+                try:
+                    page.goto(url, wait_until='domcontentloaded')
+                    page.wait_for_timeout(800)  # 短暂等待
+                    title = try_get_meta(page, 'og:title') or page.title()
+                    note_id = extract_note_id_from_url(url)
+                    info = {
+                        'title': title or '',
+                        'note_id': note_id or ''
+                    }
+                    notes_info[url] = info
+                    cached_data[url] = info
+                except Exception as e:
+                    print(f"[warn] 获取标题失败: {e}")
+                    notes_info[url] = {'title': '', 'note_id': extract_note_id_from_url(url) or ''}
+                finally:
+                    page.close()
+            except Exception as e:
+                print(f"[warn] 处理帖子失败: {e}")
+                notes_info[url] = {'title': '', 'note_id': extract_note_id_from_url(url) or ''}
+        
+        # 保存缓存
+        try:
+            cache_file.write_text(json.dumps(cached_data, ensure_ascii=False, indent=2), encoding='utf-8')
+            print(f"[info] 已缓存 {len(cached_data)} 个帖子信息")
+        except Exception as e:
+            print(f"[warn] 保存缓存失败: {e}")
+    
+    return notes_info
+
+
+def filter_links_by_keyword(links: list[str], notes_info: dict[str, dict], keyword: str, keyword_only: bool) -> tuple[list[str], list[str]]:
+    """根据关键词筛选链接。
+    
+    Returns:
+        (包含关键词的链接列表, 不包含关键词的链接列表)
+    """
+    keyword_links = []
+    other_links = []
+    
+    for url in links:
+        info = notes_info.get(url, {})
+        title = info.get('title', '')
+        if keyword and keyword.lower() in title.lower():
+            keyword_links.append(url)
+        else:
+            other_links.append(url)
+    
+    print(f"[info] 关键词 '{keyword}' 筛选结果: 匹配 {len(keyword_links)} 个，其他 {len(other_links)} 个")
+    
+    if keyword_only:
+        return keyword_links, []
+    else:
+        return keyword_links, other_links
+
+
+def run(user: str, out: str, cookies_path: str | None = None, limit: int | None = None, headless: bool = True, timeout_ms: int = 30000, user_agent: str | None = None, out_format: str = 'html', skip_existing: bool = False, note_keyword: str | None = None, keyword_only: bool = False):
     profile_url = build_profile_url(user)
     print(f"[info] 打开用户主页: {profile_url}")
     with sync_playwright() as pw:
@@ -680,6 +773,18 @@ def run(user: str, out: str, cookies_path: str | None = None, limit: int | None 
         if skip_count > 0:
             print(f"[info] 跳过已存在的帖子: {skip_count} 个")
         print(f"[info] 待处理帖子: {len(links)} 个")
+        
+        # 如果指定了关键词，获取标题并筛选
+        if note_keyword:
+            notes_info = cache_note_info(links, out, context, timeout_ms)
+            keyword_links, other_links = filter_links_by_keyword(links, notes_info, note_keyword, keyword_only)
+            
+            if keyword_only:
+                links = keyword_links
+                print(f"[info] 仅下载关键词匹配的 {len(links)} 个帖子")
+            else:
+                links = keyword_links + other_links
+                print(f"[info] 优先下载 {len(keyword_links)} 个关键词匹配帖子，然后下载 {len(other_links)} 个其他帖子")
         
         results = []
         for idx, url in enumerate(links, start=1):
@@ -785,7 +890,7 @@ def load_links_from_csv(csv_path: str) -> list[str]:
         return []
 
 
-def run_from_csv(csv_path: str, out: str, cookies_path: str | None = None, limit: int | None = None, headless: bool = True, timeout_ms: int = 30000, user_agent: str | None = None, out_format: str = 'html', skip_existing: bool = False):
+def run_from_csv(csv_path: str, out: str, cookies_path: str | None = None, limit: int | None = None, headless: bool = True, timeout_ms: int = 30000, user_agent: str | None = None, out_format: str = 'html', skip_existing: bool = False, note_keyword: str | None = None, keyword_only: bool = False):
     links = load_links_from_csv(csv_path)
     if not links:
         print(f"[warn] CSV 未读取到有效链接: {csv_path}")
@@ -826,6 +931,19 @@ def run_from_csv(csv_path: str, out: str, cookies_path: str | None = None, limit
                 context.add_cookies(cookies)
             except Exception as e:
                 print(f"[warn] 添加 cookies 失败: {e}")
+        
+        # 如果指定了关键词，获取标题并筛选
+        if note_keyword:
+            notes_info = cache_note_info(links, out, context, timeout_ms)
+            keyword_links, other_links = filter_links_by_keyword(links, notes_info, note_keyword, keyword_only)
+            
+            if keyword_only:
+                links = keyword_links
+                print(f"[info] 仅下载关键词匹配的 {len(links)} 个帖子")
+            else:
+                links = keyword_links + other_links
+                print(f"[info] 优先下载 {len(keyword_links)} 个关键词匹配帖子，然后下载 {len(other_links)} 个其他帖子")
+        
         results = []
         for idx, url in enumerate(links, start=1):
             print(f"[info] [{idx}/{len(links)}] 打开帖子: {url}")
@@ -896,6 +1014,8 @@ def parse_args():
     parser.add_argument('--user-agent', help='可选，自定义 User-Agent 字符串以提高稳定性')
     parser.add_argument('--format', choices=['html', 'markdown'], default='html', help='输出格式：html 或 markdown，默认 html')
     parser.add_argument('--skip-existing', action='store_true', help='跳过已存在的文件，不覆盖（会合并到索引中）')
+    parser.add_argument('--note-keyword', help='可选，筛选标题中包含指定关键词的帖子')
+    parser.add_argument('--keyword-only', action='store_true', help='仅下载包含关键词的帖子（需配合 --note-keyword 使用），默认为优先下载关键词帖子然后下载其他帖子')
     args = parser.parse_args()
     if not args.user and not args.csv:
         parser.error('必须提供 --user 或 --csv 之一')
@@ -915,6 +1035,8 @@ if __name__ == '__main__':
             user_agent=args.user_agent,
             out_format=args.format,
             skip_existing=args.skip_existing,
+            note_keyword=args.note_keyword,
+            keyword_only=args.keyword_only,
         )
     else:
         run(
@@ -927,4 +1049,6 @@ if __name__ == '__main__':
             user_agent=args.user_agent,
             out_format=args.format,
             skip_existing=args.skip_existing,
+            note_keyword=args.note_keyword,
+            keyword_only=args.keyword_only,
         )
