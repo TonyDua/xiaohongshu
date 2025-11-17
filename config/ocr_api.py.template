@@ -1,0 +1,21 @@
+# PaddleOCR-VL API 配置模板
+# 复制此文件为 ocr_api.py 并填写你的 API 信息
+
+# API URL - 留空则从环境变量 PADDLEOCR_API_URL 读取
+API_URL = ""
+
+# API Token - 留空则从环境变量 PADDLEOCR_API_TOKEN 读取
+API_TOKEN = ""
+
+# 默认配置
+DEFAULT_CONFIG = {
+    "useDocOrientationClassify": False,  # 图片方向矫正
+    "useDocUnwarping": False,            # 图片扭曲矫正
+    "useLayoutDetection": True,          # 版面分析
+    "useChartRecognition": False,        # 图表识别
+    "layoutThreshold": 0.5,              # 版面区域过滤强度
+    "prettifyMarkdown": True,            # Markdown 美化
+    "showFormulaNumber": False,          # 公式编号展示
+    "visualize": False,                  # 是否返回可视化结果
+}
+
