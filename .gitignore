@@ -38,13 +38,14 @@ env/
 Thumbs.db
 
 # Project specific
-output/
+# output/  # 已允许提交 output 目录
 *.log
-.tmp/
+# .tmp/  # 允许提交缓存文件
 *.json
 !pyproject.toml
 !uv.lock
 !package.json
+!output/**/*.json  # 允许提交 output 目录下的 json 文件（如果有）
 
 # Cookies and sensitive data
 cookies.json
